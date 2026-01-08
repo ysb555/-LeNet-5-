@@ -1,42 +1,31 @@
-"""
-=============================================================================
-LeNet-5 手写数字识别应用程序
-=============================================================================
-本程序用于加载训练好的LeNet-5模型，并应用于手写数字识别任务。
-
-功能：
-1. 从图片文件识别手写数字
-2. 交互式手写画板识别
-3. 批量识别测试
-
-作者：学生
-日期：2026年1月6日
-=============================================================================
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
 from PIL import Image, ImageDraw, ImageOps
 import numpy as np
-import matplotlib.pyplot as plt
 import os
+import sys
 
-# ==================== LeNet-5模型定义（与训练时相同） ====================
+# 引入GUI库
+try:
+    import tkinter as tk
+    from tkinter import messagebox, ttk # 使用ttk组件更美观
+except ImportError:
+    print("错误: 需要tkinter模块支持GUI。")
+    sys.exit(1)
+
+# ==================== 1. 模型定义 (保持不变) ====================
 class LeNet5(nn.Module):
-    """
-    LeNet-5卷积神经网络模型
-    """
     def __init__(self):
         super(LeNet5, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=6, kernel_size=5, stride=1, padding=0)
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv2 = nn.Conv2d(in_channels=6, out_channels=16, kernel_size=5, stride=1, padding=0)
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv3 = nn.Conv2d(in_channels=16, out_channels=120, kernel_size=5, stride=1, padding=0)
-        self.fc1 = nn.Linear(in_features=120, out_features=84)
-        self.fc2 = nn.Linear(in_features=84, out_features=10)
+        self.conv1 = nn.Conv2d(1, 6, 5)
+        self.pool1 = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.pool2 = nn.MaxPool2d(2, 2)
+        self.conv3 = nn.Conv2d(16, 120, 5)
+        self.fc1 = nn.Linear(120, 84)
+        self.fc2 = nn.Linear(84, 10)
     
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -49,459 +38,241 @@ class LeNet5(nn.Module):
         x = self.fc2(x)
         return x
 
-
-# ==================== 模型加载类 ====================
-class DigitRecognizer:
+# ==================== 2. 智能预处理 (核心算法) ====================
+def smart_preprocessing(img_pil):
     """
-    手写数字识别器
-    
-    用于加载训练好的LeNet-5模型并进行预测
+    仿照MNIST数据集制作过程：
+    1. 提取数字最小包围盒
+    2. 缩放到20x20
+    3. 居中放置在28x28的画布上
     """
+    img = img_pil.convert('L')
+    bbox = img.getbbox()
     
-    def __init__(self, model_path='lenet5_mnist.pth'):
-        """
-        初始化识别器
+    if bbox is None:
+        return img.resize((28, 28))
         
-        参数:
-            model_path: 模型权重文件路径
-        """
-        # 设置计算设备
+    digit = img.crop(bbox)
+    w, h = digit.size
+    
+    # 保持长宽比缩放，最大边长为20
+    max_side = max(w, h)
+    scale = 20.0 / max_side
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    
+    digit = digit.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    # 创建28x28黑底
+    new_img = Image.new('L', (28, 28), 0)
+    
+    # 居中粘贴
+    paste_x = (28 - new_w) // 2
+    paste_y = (28 - new_h) // 2
+    new_img.paste(digit, (paste_x, paste_y))
+    
+    return new_img
+
+# ==================== 3. 现代化 GUI 界面 ====================
+class ModernApp:
+    def __init__(self, root, model_path='lenet5_mnist.pth'):
+        self.root = root
+        self.root.title("LeNet-5 手写数字识别系统")
+        self.root.geometry("700x520")
+        
+        # 尝试设置图标和样式
+        style = ttk.Style()
+        style.theme_use('clam')  # 使用更现代的主题
+        
+        # 定义颜色和字体
+        self.bg_color = "#f5f6f7"
+        self.root.configure(bg=self.bg_color)
+        self.font_title = ("Microsoft YaHei", 16, "bold")
+        self.font_normal = ("Microsoft YaHei", 10)
+        self.font_digit = ("Arial", 60, "bold")
+
+        # 加载模型
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"使用设备: {self.device}")
-        
-        # 创建模型实例
         self.model = LeNet5().to(self.device)
+        self.model_loaded = False
         
-        # 加载训练好的权重
         if os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            print(f"成功加载模型: {model_path}")
+            try:
+                self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+                self.model.eval()
+                self.model_loaded = True
+            except Exception as e:
+                messagebox.showerror("错误", f"模型损坏: {e}")
         else:
-            raise FileNotFoundError(f"模型文件不存在: {model_path}\n请先运行 lenet5_mnist.py 训练模型")
-        
-        # 设置为评估模式
-        self.model.eval()
-        
-        # 定义图像预处理流程
+            messagebox.showwarning("警告", f"找不到模型文件: {model_path}")
+
+        # === 修复 Bug 的关键：加入 Pad(2) ===
         self.transform = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),  # 转换为灰度图
-            transforms.Resize((28, 28)),                   # 调整大小为28x28
-            transforms.ToTensor(),                         # 转换为张量
-            transforms.Normalize((0.1307,), (0.3081,)),   # 标准化
-            transforms.Pad(2)                              # 填充到32x32
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+            transforms.Pad(2)  # <--- 必须加这个！将28x28填充为32x32
         ])
-    
-    def preprocess_image(self, image):
-        """
-        预处理图像
-        
-        参数:
-            image: PIL Image对象或图像文件路径
-            
-        返回:
-            预处理后的张量
-        """
-        # 如果是路径，加载图像
-        if isinstance(image, str):
-            image = Image.open(image)
-        
-        # 确保是PIL Image
-        if not isinstance(image, Image.Image):
-            image = Image.fromarray(image)
-        
-        # 转换为灰度图
-        if image.mode != 'L':
-            image = image.convert('L')
-        
-        # 如果背景是白色，数字是黑色，需要反转
-        # MNIST数据集是黑底白字
-        image_array = np.array(image)
-        if np.mean(image_array) > 127:  # 如果平均值大于127，说明是白底
-            image = ImageOps.invert(image)
-        
-        # 应用预处理变换
-        tensor = self.transform(image)
-        
-        # 添加batch维度
-        tensor = tensor.unsqueeze(0)
-        
-        return tensor
-    
-    def predict(self, image):
-        """
-        预测手写数字
-        
-        参数:
-            image: PIL Image对象、图像文件路径或numpy数组
-            
-        返回:
-            predicted_digit: 预测的数字 (0-9)
-            confidence: 置信度 (0-1)
-            probabilities: 各类别的概率分布
-        """
-        # 预处理图像
-        tensor = self.preprocess_image(image)
-        tensor = tensor.to(self.device)
-        
-        # 进行预测
-        with torch.no_grad():
-            output = self.model(tensor)
-            
-            # 使用softmax获取概率分布
-            probabilities = F.softmax(output, dim=1)
-            
-            # 获取预测类别和置信度
-            confidence, predicted = torch.max(probabilities, 1)
-            
-            predicted_digit = predicted.item()
-            confidence = confidence.item()
-            probabilities = probabilities.squeeze().cpu().numpy()
-        
-        return predicted_digit, confidence, probabilities
-    
-    def predict_from_file(self, image_path):
-        """
-        从图像文件预测数字
-        
-        参数:
-            image_path: 图像文件路径
-        """
-        if not os.path.exists(image_path):
-            print(f"错误: 文件不存在 - {image_path}")
-            return
-        
-        # 预测
-        digit, confidence, probs = self.predict(image_path)
-        
-        # 显示结果
-        print(f"\n{'='*50}")
-        print(f"图像文件: {image_path}")
-        print(f"{'='*50}")
-        print(f"预测结果: {digit}")
-        print(f"置信度: {confidence*100:.2f}%")
-        print(f"\n各数字的概率:")
-        for i, prob in enumerate(probs):
-            bar = '█' * int(prob * 30)
-            print(f"  {i}: {bar} {prob*100:.2f}%")
-        
-        # 可视化
-        self._visualize_prediction(image_path, digit, confidence, probs)
-        
-        return digit, confidence
-    
-    def _visualize_prediction(self, image_path, digit, confidence, probs):
-        """
-        可视化预测结果
-        """
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        
-        # 显示原始图像
-        img = Image.open(image_path)
-        axes[0].imshow(img, cmap='gray')
-        axes[0].set_title(f'输入图像\n预测: {digit} (置信度: {confidence*100:.1f}%)', fontsize=14)
-        axes[0].axis('off')
-        
-        # 显示概率分布
-        colors = ['green' if i == digit else 'steelblue' for i in range(10)]
-        axes[1].barh(range(10), probs, color=colors)
-        axes[1].set_yticks(range(10))
-        axes[1].set_yticklabels([str(i) for i in range(10)])
-        axes[1].set_xlabel('概率', fontsize=12)
-        axes[1].set_title('各数字的预测概率', fontsize=14)
-        axes[1].set_xlim(0, 1)
-        
-        # 添加概率值标签
-        for i, prob in enumerate(probs):
-            axes[1].text(prob + 0.02, i, f'{prob*100:.1f}%', va='center', fontsize=10)
-        
-        plt.tight_layout()
-        plt.savefig('prediction_output.png', dpi=150, bbox_inches='tight')
-        plt.show()
-        print("\n结果已保存为 prediction_output.png")
 
+        self._init_ui()
 
-# ==================== 交互式手写画板 ====================
-class HandwritingCanvas:
-    """
-    交互式手写画板
-    
-    使用matplotlib创建一个简单的画板，用户可以用鼠标手写数字
-    """
-    
-    def __init__(self, recognizer):
-        """
-        初始化画板
+    def _init_ui(self):
+        # 主容器
+        main_frame = tk.Frame(self.root, bg=self.bg_color)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        参数:
-            recognizer: DigitRecognizer实例
-        """
-        self.recognizer = recognizer
+        # --- 左侧区域：绘图板 ---
+        left_panel = tk.Frame(main_frame, bg=self.bg_color)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        
+        tk.Label(left_panel, text="手写输入区", font=self.font_title, bg=self.bg_color, fg="#333").pack(anchor="w", pady=(0, 10))
+        
+        # 画布边框容器
+        canvas_frame = tk.Frame(left_panel, bg="white", bd=2, relief="groove")
+        canvas_frame.pack()
+        
+        self.canvas_size = 300
+        self.canvas = tk.Canvas(canvas_frame, width=self.canvas_size, height=self.canvas_size, 
+                                bg="black", cursor="crosshair", highlightthickness=0)
+        self.canvas.pack()
+        
+        # 提示文本
+        tk.Label(left_panel, text="鼠标左键书写，右键也可清除", font=("Microsoft YaHei", 9), fg="#888", bg=self.bg_color).pack(pady=5)
+        
+        # 按钮组
+        btn_frame = tk.Frame(left_panel, bg=self.bg_color)
+        btn_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(btn_frame, text="清除画布 (Clear)", command=self.clear_canvas).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        # 绑定事件
+        self.canvas.bind("<Button-1>", self.start_draw)
+        self.canvas.bind("<B1-Motion>", self.draw)
+        self.canvas.bind("<ButtonRelease-1>", self.stop_draw)
+        self.canvas.bind("<Button-3>", lambda e: self.clear_canvas()) # 右键清除
+
+        # --- 右侧区域：结果显示 ---
+        right_panel = tk.Frame(main_frame, bg=self.bg_color)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        tk.Label(right_panel, text="识别分析", font=self.font_title, bg=self.bg_color, fg="#333").pack(anchor="w", pady=(0, 10))
+        
+        # 结果卡片
+        res_card = tk.Frame(right_panel, bg="white", bd=1, relief="solid")
+        res_card.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(res_card, text="预测结果", bg="white", fg="#666", font=("Microsoft YaHei", 10)).pack(pady=(10, 0))
+        self.lbl_pred = tk.Label(res_card, text="-", font=self.font_digit, bg="white", fg="#2196F3")
+        self.lbl_pred.pack(pady=0)
+        self.lbl_conf = tk.Label(res_card, text="等待输入...", bg="white", fg="#666", font=("Microsoft YaHei", 12))
+        self.lbl_conf.pack(pady=(0, 15))
+
+        # 概率图表
+        tk.Label(right_panel, text="概率分布详情:", bg=self.bg_color, font=("Microsoft YaHei", 10, "bold")).pack(anchor="w")
+        
+        self.prob_canvas = tk.Canvas(right_panel, bg="white", height=200, highlightthickness=0)
+        self.prob_canvas.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # 识别按钮
+        self.btn_predict = tk.Button(right_panel, text="立即识别 (Predict)", command=self.predict, 
+                                     bg="#4CAF50", fg="white", font=("Microsoft YaHei", 12, "bold"), 
+                                     relief="flat", cursor="hand2", pady=10)
+        self.btn_predict.pack(fill=tk.X, side=tk.BOTTOM)
+
+        # 内部绘图数据
+        self.image = Image.new("L", (self.canvas_size, self.canvas_size), 0)
+        self.draw_pil = ImageDraw.Draw(self.image)
         self.drawing = False
-        self.last_x = None
-        self.last_y = None
-        
-        # 创建画布 (200x200像素)
-        self.canvas_size = 200
-        self.image = Image.new('L', (self.canvas_size, self.canvas_size), color=0)  # 黑色背景
-        self.draw = ImageDraw.Draw(self.image)
-        
-    def start(self):
-        """
-        启动交互式画板
-        """
-        print("\n" + "="*50)
-        print("交互式手写数字识别")
-        print("="*50)
-        print("操作说明:")
-        print("  - 按住鼠标左键绘制数字")
-        print("  - 按 'r' 键清除画布")
-        print("  - 按 'p' 键进行预测")
-        print("  - 按 'q' 键或关闭窗口退出")
-        print("="*50 + "\n")
-        
-        # 创建图形窗口
-        self.fig, self.ax = plt.subplots(figsize=(6, 6))
-        self.ax.set_xlim(0, self.canvas_size)
-        self.ax.set_ylim(self.canvas_size, 0)  # 翻转y轴
-        self.ax.set_aspect('equal')
-        self.ax.set_title('手写画板 (按r清除, 按p预测, 按q退出)', fontsize=12)
-        self.ax.axis('off')
-        
-        # 显示画布
-        self.img_display = self.ax.imshow(self.image, cmap='gray', vmin=0, vmax=255)
-        
-        # 连接事件
-        self.fig.canvas.mpl_connect('button_press_event', self._on_press)
-        self.fig.canvas.mpl_connect('button_release_event', self._on_release)
-        self.fig.canvas.mpl_connect('motion_notify_event', self._on_move)
-        self.fig.canvas.mpl_connect('key_press_event', self._on_key)
-        
-        plt.show()
-    
-    def _on_press(self, event):
-        """鼠标按下事件"""
-        if event.inaxes == self.ax:
-            self.drawing = True
-            self.last_x = event.xdata
-            self.last_y = event.ydata
-    
-    def _on_release(self, event):
-        """鼠标释放事件"""
+        self.last_point = None
+
+    def start_draw(self, event):
+        self.drawing = True
+        self.last_point = (event.x, event.y)
+
+    def draw(self, event):
+        if self.drawing and self.last_point:
+            x, y = event.x, event.y
+            # 绘制线条 (更平滑)
+            r = 8 # 笔触粗细
+            self.canvas.create_line(self.last_point[0], self.last_point[1], x, y, 
+                                    width=r*2, fill="white", capstyle=tk.ROUND, smooth=True)
+            self.draw_pil.line([self.last_point, (x, y)], fill=255, width=r*2, joint="curve")
+            self.last_point = (x, y)
+
+    def stop_draw(self, event):
         self.drawing = False
-        self.last_x = None
-        self.last_y = None
-    
-    def _on_move(self, event):
-        """鼠标移动事件"""
-        if self.drawing and event.inaxes == self.ax:
-            if self.last_x is not None and self.last_y is not None:
-                # 绘制线条
-                self.draw.line(
-                    [(self.last_x, self.last_y), (event.xdata, event.ydata)],
-                    fill=255,  # 白色
-                    width=5   # 线条粗细
-                )
-                self.last_x = event.xdata
-                self.last_y = event.ydata
-                
-                # 更新显示
-                self.img_display.set_data(self.image)
-                self.fig.canvas.draw_idle()
-    
-    def _on_key(self, event):
-        """键盘事件"""
-        if event.key == 'r':
-            # 清除画布
-            self.image = Image.new('L', (self.canvas_size, self.canvas_size), color=0)
-            self.draw = ImageDraw.Draw(self.image)
-            self.img_display.set_data(self.image)
-            self.fig.canvas.draw_idle()
-            print("画布已清除")
-            
-        elif event.key == 'p':
-            # 进行预测
-            self._predict()
-            
-        elif event.key == 'q':
-            # 退出
-            plt.close(self.fig)
-    
-    def _predict(self):
-        """对当前画布内容进行预测"""
-        # 检查画布是否为空
-        img_array = np.array(self.image)
-        if np.max(img_array) == 0:
-            print("画布为空，请先绘制数字！")
+        self.last_point = None
+        # 自动识别体验更好，你可以注释掉下面这行改为手动点击
+        # self.predict() 
+
+    def clear_canvas(self):
+        self.canvas.delete("all")
+        self.image = Image.new("L", (self.canvas_size, self.canvas_size), 0)
+        self.draw_pil = ImageDraw.Draw(self.image)
+        self.lbl_pred.config(text="-", fg="#2196F3")
+        self.lbl_conf.config(text="等待输入...", fg="#666")
+        self.prob_canvas.delete("all")
+
+    def predict(self):
+        if not self.model_loaded: return
+
+        # 1. 检查是否为空
+        if not self.canvas.find_all():
+            self.lbl_conf.config(text="画布为空", fg="red")
             return
-        
-        # 预测
-        digit, confidence, probs = self.recognizer.predict(self.image)
-        
-        # 显示结果
-        print(f"\n预测结果: {digit} (置信度: {confidence*100:.2f}%)")
-        
-        # 更新标题
-        self.ax.set_title(f'预测结果: {digit} (置信度: {confidence*100:.1f}%)', fontsize=14)
-        self.fig.canvas.draw_idle()
 
-
-# ==================== 批量测试函数 ====================
-def batch_test(recognizer, image_folder):
-    """
-    批量测试图像文件夹中的所有图像
-    
-    参数:
-        recognizer: DigitRecognizer实例
-        image_folder: 图像文件夹路径
-    """
-    if not os.path.exists(image_folder):
-        print(f"错误: 文件夹不存在 - {image_folder}")
-        return
-    
-    # 支持的图像格式
-    supported_formats = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
-    
-    # 获取所有图像文件
-    image_files = [f for f in os.listdir(image_folder) 
-                   if f.lower().endswith(supported_formats)]
-    
-    if not image_files:
-        print(f"文件夹中没有找到图像文件: {image_folder}")
-        return
-    
-    print(f"\n找到 {len(image_files)} 个图像文件")
-    print("="*60)
-    
-    results = []
-    for filename in image_files:
-        filepath = os.path.join(image_folder, filename)
+        # 2. 预处理 (转28x28居中)
+        processed_img = smart_preprocessing(self.image)
+        
+        # 3. 转换为Tensor (这里会自动Pad到32x32)
         try:
-            digit, confidence, _ = recognizer.predict(filepath)
-            results.append((filename, digit, confidence))
-            print(f"{filename}: 预测={digit}, 置信度={confidence*100:.2f}%")
-        except Exception as e:
-            print(f"{filename}: 处理失败 - {e}")
-    
-    print("="*60)
-    print(f"处理完成，共 {len(results)} 个文件")
-    
-    return results
+            img_tensor = self.transform(processed_img).unsqueeze(0).to(self.device)
+            
+            with torch.no_grad():
+                output = self.model(img_tensor)
+                probs = F.softmax(output, dim=1)
+                conf, pred = torch.max(probs, 1)
+            
+            digit = pred.item()
+            confidence = conf.item()
+            
+            # 4. 更新UI
+            self.lbl_pred.config(text=str(digit), fg="#e91e63") # 识别结果用醒目颜色
+            self.lbl_conf.config(text=f"置信度: {confidence*100:.1f}%", fg="#333")
+            self.draw_chart(probs.squeeze().cpu().numpy(), digit)
+            
+        except RuntimeError as e:
+            messagebox.showerror("运行错误", f"模型输入尺寸不匹配。\n详情: {e}")
 
+    def draw_chart(self, probs, target_digit):
+        self.prob_canvas.delete("all")
+        w = self.prob_canvas.winfo_width()
+        h = self.prob_canvas.winfo_height()
+        bar_h = h / 10
+        
+        for i, p in enumerate(probs):
+            y0 = i * bar_h + 4
+            y1 = (i + 1) * bar_h - 4
+            
+            # 绘制背景槽
+            self.prob_canvas.create_rectangle(30, y0, w-50, y1, fill="#f0f0f0", outline="")
+            
+            # 绘制数据条
+            bar_w = (w - 80) * p
+            color = "#e91e63" if i == target_digit else "#90caf9" # 选中项红色，其他蓝色
+            self.prob_canvas.create_rectangle(30, y0, 30 + bar_w, y1, fill=color, outline="")
+            
+            # 文字标签
+            self.prob_canvas.create_text(15, (y0+y1)/2, text=str(i), fill="#555", font=("Arial", 10))
+            self.prob_canvas.create_text(w-25, (y0+y1)/2, text=f"{p*100:.0f}%", fill="#888", font=("Arial", 8))
 
-# ==================== 主程序 ====================
-def main():
-    """
-    主程序入口
-    """
-    print("="*60)
-    print("LeNet-5 手写数字识别应用")
-    print("="*60)
-    
-    # 加载模型
-    try:
-        recognizer = DigitRecognizer('lenet5_mnist.pth')
-    except FileNotFoundError as e:
-        print(e)
-        return
-    
-    while True:
-        print("\n请选择功能:")
-        print("  1. 从图像文件识别")
-        print("  2. 交互式手写画板")
-        print("  3. 批量识别文件夹")
-        print("  4. 测试MNIST样本")
-        print("  0. 退出")
-        
-        choice = input("\n请输入选项 (0-4): ").strip()
-        
-        if choice == '1':
-            # 从图像文件识别
-            image_path = input("请输入图像文件路径: ").strip()
-            if image_path:
-                recognizer.predict_from_file(image_path)
-            
-        elif choice == '2':
-            # 交互式手写画板
-            canvas = HandwritingCanvas(recognizer)
-            canvas.start()
-            
-        elif choice == '3':
-            # 批量识别
-            folder_path = input("请输入图像文件夹路径: ").strip()
-            if folder_path:
-                batch_test(recognizer, folder_path)
-            
-        elif choice == '4':
-            # 测试MNIST样本
-            test_mnist_samples(recognizer)
-            
-        elif choice == '0':
-            print("感谢使用，再见！")
-            break
-        
-        else:
-            print("无效选项，请重新输入")
-
-
-def test_mnist_samples(recognizer):
-    """
-    使用MNIST测试样本进行测试
-    """
-    try:
-        from torchvision import datasets, transforms
-        
-        # 加载MNIST测试集
-        test_dataset = datasets.MNIST(
-            root='./data',
-            train=False,
-            download=True,
-            transform=transforms.ToTensor()
-        )
-        
-        print("\n随机选择10个MNIST测试样本进行预测:")
-        print("="*50)
-        
-        # 随机选择10个样本
-        indices = np.random.choice(len(test_dataset), 10, replace=False)
-        
-        correct = 0
-        fig, axes = plt.subplots(2, 5, figsize=(15, 6))
-        
-        for idx, ax in zip(indices, axes.flat):
-            image, true_label = test_dataset[idx]
-            
-            # 转换为PIL Image进行预测
-            pil_image = transforms.ToPILImage()(image)
-            digit, confidence, _ = recognizer.predict(pil_image)
-            
-            # 检查是否正确
-            is_correct = (digit == true_label)
-            if is_correct:
-                correct += 1
-            
-            # 显示图像
-            ax.imshow(image.squeeze().numpy(), cmap='gray')
-            color = 'green' if is_correct else 'red'
-            ax.set_title(f'真实: {true_label}, 预测: {digit}\n置信度: {confidence*100:.1f}%', 
-                        color=color, fontsize=10)
-            ax.axis('off')
-        
-        plt.suptitle(f'MNIST测试样本预测结果 (正确率: {correct}/10)', fontsize=14)
-        plt.tight_layout()
-        plt.savefig('mnist_test_results.png', dpi=150, bbox_inches='tight')
-        plt.show()
-        
-        print(f"\n预测正确: {correct}/10")
-        print("结果已保存为 mnist_test_results.png")
-        
-    except Exception as e:
-        print(f"测试失败: {e}")
-
-
-# ==================== 程序入口 ====================
 if __name__ == "__main__":
-    # 设置matplotlib支持中文显示
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
+    root = tk.Tk()
+    # 居中屏幕
+    ws = root.winfo_screenwidth()
+    hs = root.winfo_screenheight()
+    x = (ws/2) - (700/2)
+    y = (hs/2) - (520/2)
+    root.geometry('+%d+%d' % (x, y))
     
-    main()
+    app = ModernApp(root, model_path='lenet5_mnist.pth')
+    root.mainloop()
